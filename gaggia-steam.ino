@@ -1,7 +1,15 @@
+// -----
+// Gaggia Classic Pro Elegant Hack firmware
+//
+// GNU GPL V3 license
+//
+// -----
+
 #include <U8g2lib.h>  // U8g2 Library for Oled https://github.com/olikraus/u8g2
 #include "QuickPID.h"
 #include <EEPROM.h>
 #include <math.h>
+
 
 // To be done
 // **** flash power icon if power up time is less than 15 min
@@ -11,6 +19,9 @@
 //*****************************************
 #define PULL_MIN_THRESHHOLD 18000 // in milliseconds.  Must be this long before it is considered a shot pulled or shot counter increment
 //*****************************************
+
+// Conditional compile flag to add more features
+// #define DISPLAY_TEMP
 
 // Global Define
 #define LifeCycle_EEPROM_Addr 0
@@ -40,6 +51,9 @@ void setup(void) {
     
     // Read EEPROM LifeCycle
     EEPROM.get(LifeCycle_EEPROM_Addr, lifeCycle);
+
+    // if getting a lifeCycle out of range, means new board and new initilize to 1
+    if (lifeCycle < 0 or lifeCycle > 10,000) EEPROM.put(LifeCycle_EEPROM_Addr, 1);
 
     // Setup digital Pulling Switch IN with pullup.  0 means pulling shot.  
     pinMode(PULLING_PIN, INPUT_PULLUP);
@@ -142,6 +156,7 @@ void refreshScreen(void) {
         u8g2.drawStr(space, LINE1, myString.c_str());  // set position and text to display
     }
 
+#if defined DISPLAY_TEMP   // Only compiled in this section if version support temperature
     // Display Curent temperature icon
     u8g2.setFont(u8g2_font_open_iconic_thing_2x_t);  // Choose font to use
     u8g2.drawGlyph(0, (LINE2-3), 72);  // Display Boiler Symbol
@@ -155,8 +170,10 @@ void refreshScreen(void) {
     u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
     myString = String("200") + "\xb0";
     u8g2.drawStr(95, LINE2, myString.c_str());
+#endif
 
     // Display Pull
+    u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
     myString = String("Pull");
     u8g2.drawStr(0, LINE3, myString.c_str());
 
@@ -167,6 +184,7 @@ void refreshScreen(void) {
     myTemp2 = log10 (lifeCycle);
     myString = String(lifeCycle);
     u8g2.drawStr((120-myTemp2*10), LINE3, myString.c_str());
+
 
     // Display lastPull time
     if (lastPull != 0) {
