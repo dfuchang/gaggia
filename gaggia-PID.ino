@@ -27,7 +27,9 @@
 
 // Global Define
 #define LifeCycle_EEPROM_Addr 0
-#define LINE1 65
+#define LINE1 65  // Power Minute Line
+#define LINE1_1 30  // PID legend line
+#define LINE1_2 50  // PID value line
 #define LINE2 100
 #define LINE3 126
 
@@ -37,9 +39,10 @@
 #define ROTARY_ENCODER_PIN1  3  // Used for ISR for rotary knob
 #define ROTARY_ENCODER_PIN2  4  // used for ISR for rotary knob
 #define ROTARY_GROUND 5 // used for rotary knob ground
-#define BUTTON_PIN 21 // used to detect rotary encoder button press
-#define BUTTON_GND 22 // used for ground
+#define BUTTON_PIN 20 // used to detect rotary encoder button press
+#define BUTTON_GND 21 // used for ground
 #define STEAM_PIN 6 // Steam detction.  Ground connected to ground pin #2
+#define BUTTON_DEBOUNCE 300  // button debounce in millisecond
 
 
 // Glogal Variable
@@ -50,6 +53,12 @@ String myString;   // temp string
 unsigned long pullOn = LOW;  // Pulling Shot Button ON
 unsigned long lastPull = 0; // last pull time
 unsigned long steamOn = 0; // steam turn on time
+unsigned long buttonTime = 0;  // Time stamp of when last button press 
+int buttonConfig = false; // used to indicate button configuration is ON
+int PID_P = 4; // PID variable
+int PID_I = 2;
+int PID_D = 5;
+
 
 // U8g2 Library Full Frame Buffer mode used
 U8G2_SSD1327_MIDAS_128X128_F_4W_HW_SPI u8g2(U8G2_R0, /* cs=*/ 10, /* dc=*/ 9, /* reset=*/ 8);
@@ -174,8 +183,40 @@ void refreshScreen(void) {
         u8g2.drawStr(space, LINE1, myString.c_str());  // set position and text to display
     }
 
-    // check if just in normal mode not pulling shots or steaming
-    if (pullOn == 0 && steamOn ==0)  {
+    // check if in button config mode
+    //     buttonConfig == false   NOT in config mode
+    //     buttonConfig == 1 in P config mode
+    //     buttonConfig == 2 in I config mode
+    //     buttonConfig == 3 in D config mode
+    if (steamOn == 0 && pullOn == 0 && buttonConfig > 0) {
+      // Not in steam or pulling shot and button configuration is ON
+
+      // display PID legend
+      u8g2.setFont(u8g2_font_timB14_tf);  // 
+      u8g2.drawStr(0, LINE1_1, "    P      I      D");
+      
+      // Display actual P value and flash it if it is being configured
+      if (buttonConfig == 1 && ((millis() % 1000) < 500) || buttonConfig != 1) { 
+        myString = PID_P;  
+        u8g2.drawStr(20, LINE1_2, myString.c_str());  // set position and text to display
+      }
+
+      // Display actual I value and flash it if it is being configured
+      if (buttonConfig == 2 && ((millis() % 1000) < 500) || buttonConfig !=2) { 
+        myString = PID_I;  
+        u8g2.drawStr(60, LINE1_2, myString.c_str());  // set position and text to display
+      }
+
+      // Display actual P value and flash it if it is being configured
+      if (buttonConfig == 3 && ((millis() % 1000) < 500) || buttonConfig !=3) { 
+        myString = PID_D;  
+        u8g2.drawStr(100, LINE1_2, myString.c_str());  // set position and text to display
+      }
+      
+    } else buttonConfig = false;
+
+    // check if just in normal mode not pulling shots or steaming or button config
+    if (pullOn == 0 && steamOn == 0 && buttonConfig == 0)  {
         // Normal display cycle - Indiate current powerup minute
 
         // display solid power symbol if power up time > 15 min
@@ -320,14 +361,41 @@ void loop(void) {
       int newPos = encoder->getPosition();
       if (pos != newPos) {
           // rotary encoder has been turned.  Direction are either +1 or -1
-          targetTemp = targetTemp + (int) (encoder->getDirection());
+
+          // check what config stage we are in
+          switch (buttonConfig) {
+            case 0:
+              // if buttonConfig == 0 change temperature by 1 degree
+              targetTemp = targetTemp + (int) (encoder->getDirection());
+            break;
+
+            case 1:
+              // if buttonConfig == 1 change PID_P by 1
+              PID_P = PID_P + (int) (encoder->getDirection());
+            break;
+
+            case 2:
+              // if buttonConfig == 2 change PID_I by 1
+              PID_I = PID_I + (int) (encoder->getDirection());
+            break;
+
+            case 3:
+              // if buttonConfig == 3 change PID_D by 1
+              PID_D = PID_D + (int) (encoder->getDirection());
+            break;
+          }
+          
           pos = newPos;
       } // if
 
       // detect button press
-      if (digitalRead(BUTTON_PIN) == LOW) {
-        // Button pressed
-        targetTemp = targetTemp + 10;
+      if (digitalRead(BUTTON_PIN) == LOW && ((millis() - buttonTime) > BUTTON_DEBOUNCE )) {
+        
+        // save off button press value
+        buttonTime = millis();
+
+        // button config mode on & increment to next stage
+        buttonConfig = (buttonConfig + 1) % 4; // cycle through 0-3 ONLY while always increase by 1
       }
       
       refreshScreen();
