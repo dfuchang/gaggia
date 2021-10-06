@@ -50,9 +50,9 @@
 #define BUTTON_DEBOUNCE 300  // button debounce in millisecond
 #define RREF      430.0  // MAX31865 value of Rref resistor 430.0 for PT100
 #define RNOMINAL  100.2  // MAX31865 nominal 0-degree-C resistance of sensor. 100.0 for PT100
-#define WINDOW_SIZE 2000  // Used to control relay slow PWM
-#define WINDOW_MIN 100 // minimum time to turn on Boiler is 0.5s
-#define STEAM_TEMP_TARGET 285  // target temperature for steam temp
+#define WINDOW_SIZE 1000  // Used to control relay slow PWM
+#define WINDOW_MIN 50 // minimum time to turn on Boiler is 0.05s
+#define STEAM_TEMP_TARGET 300  // target temperature for steam temp
 #define BREW_TEMP_TARGET_DEFAULT 220  // target tmperature for brewing temp
 
 // PIN definitions
@@ -560,8 +560,8 @@ void loop(void) {
 
             case 4:
               // if buttonConfig == 4 change BrewingMinOn by 50
-              if (encoder->getDirection() == RotaryEncoder::Direction::CLOCKWISE) BrewingMinOn = BrewingMinOn + 50;
-              else BrewingMinOn = BrewingMinOn - 50;
+              if (encoder->getDirection() == RotaryEncoder::Direction::CLOCKWISE) BrewingMinOn = BrewingMinOn + 25;
+              else BrewingMinOn = BrewingMinOn - 25;
 
               // save off in EEPROM
               EEPROM.put(EE_BREWING_MIN_ON, (int)BrewingMinOn); 
@@ -590,20 +590,28 @@ void loop(void) {
       
       //************************************************
       // PID Processing
-      if (millis() - PID_WinStartTime >= WINDOW_SIZE)
-      { //time to shift the Relay Window
-                
-        #ifdef DEBUG  
-        Serial.println("shift PID window");
-        #endif
+      if (millis() - PID_WinStartTime >= WINDOW_SIZE) {
+          //time to shift the Relay Window
+                  
+          #ifdef DEBUG  
+          Serial.println("shift PID window");
+          #endif
+  
+          PID_WinStartTime += WINDOW_SIZE;
+          myQuickPID.Compute();
+          
+          // if Pulling shots and temp less than current target +5 (safety), add BrewingMinOn to Output
+          if ((pullOn > 0) && (boilerTemp < (Setpoint + 1))) Output=Output+BrewingMinOn;
+    
+          // after 5 seconds overide Output to just 75% of BrewingMinOn since reached 9 bars pressure
+          if ((pullOn > 5000) && (boilerTemp < (Setpoint + 1))) Output=Output-(BrewingMinOn*0.50);
 
-        PID_WinStartTime += WINDOW_SIZE;
-        myQuickPID.Compute();
-
-        // if Pulling shots and temp less than 230, add BrewingMinOn to Output
-        if ((pullOn > 0) && (boilerTemp <230)) Output=Output+BrewingMinOn;
-      }
-
+        }
+      
+      // safety check - do not turn on boiler if temperature is > 310 degree.   The gaggia also has a temperature
+      // fuse that will cutoff power to broiler at 330 degree or so.  
+          if (boilerTemp > 305) Output = 0;
+          
       // if PID output value > minimal turn on time && PID output > 
       if (((unsigned int)Output < WINDOW_MIN) || ((unsigned int)Output < (millis() - PID_WinStartTime))) {
         digitalWrite(RELAY_PIN_5V, LOW);
