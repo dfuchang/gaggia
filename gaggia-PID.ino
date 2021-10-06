@@ -21,7 +21,7 @@
 //*****************************************
 //****    User modifiable parameters   ****
 //*****************************************
-//#define DEBUG  // Used to compile for serial output debug info
+#define DEBUG  // Used to compile for serial output debug info
 #define PULL_MIN_THRESHHOLD 15000 // in milliseconds.  Must be this long before it is considered a shot pulled or shot counter increment
 //*****************************************
 
@@ -85,6 +85,7 @@ int buttonConfig = false; // used to indicate button configuration is ON
 int brewTempTarget;  // used to track last brew temperature before going to steam
 int boilerStat=0;  // status of relay to turn on boiler for display purposes
 int BrewingMinOn; // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
+int boilerOffset, testMode; // use for display only
 
 // QuickPID definition
 unsigned long PID_WinStartTime; // used for PID Relay PWM window calculation
@@ -400,15 +401,19 @@ void refreshScreen(void) {
 
     // Display Pull
     u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
-    myString = String("Boiler");
+    // myString = String("Boiler");
+    myString = String("boiler");
     u8g2.drawStr(0, LINE3, myString.c_str());
 
     // Display LifeCycle, calculate offset base on number of digit
     // myTemp2 = log10 (lifeCycle);
     // myString = String(lifeCycle);
-    myTemp2 = log10 (Output);
-    myString = String((int)Output);
+    myTemp2 = log10 (Output+boilerOffset);
+    myString = String((int)(Output+boilerOffset));
     u8g2.drawStr((120-myTemp2*10), LINE3, myString.c_str());
+
+    myString = String((int)testMode);  // debug
+    u8g2.drawStr(60, LINE3, myString.c_str()); //debug
 
     // Display lastPull time if we are not pulling shot or steaming and in button config mode.  
     if (!(steamOn == 0 && pullOn == 0 && buttonConfig > 0)) {
@@ -460,6 +465,7 @@ void loop(void) {
   startupScreen();
   delay(5000);
   int pos = 0, newPos=0, temp=0;  // used for rotary encoder
+  float myTemp;
 
   while (1) {
       // Read if Pulling Switching is ON - LOW is ON because pin is PULLUP
@@ -599,36 +605,39 @@ void loop(void) {
   
           PID_WinStartTime += WINDOW_SIZE;
           myQuickPID.Compute();
-          
-          // if Pulling shots and temp less than current target +5 (safety), add BrewingMinOn to Output
-          if ((pullOn > 0) && (boilerTemp < (Setpoint + 1))) Output=Output+BrewingMinOn;
-    
-          // after 5 seconds overide Output to just 75% of BrewingMinOn since reached 9 bars pressure
-          if ((pullOn > 5000) && (boilerTemp < (Setpoint + 1))) Output=Output-(BrewingMinOn*0.50);
+        }
 
-        }
+      // ***********************************************
+      // *** NOTE the next section ORDER is important ***
+      // set relay to turn on boiler and pass in offset.  The offset is used to subtract away from relay pwm ms unit less than window size
+      // if not pulling shot, use offset of 0
       
-      // safety check - do not turn on boiler if temperature is > 310 degree.   The gaggia also has a temperature
-      // fuse that will cutoff power to broiler at 330 degree or so.  
-          if (boilerTemp > 305) Output = 0;
-          
-      // if PID output value > minimal turn on time && PID output > 
-      if (((unsigned int)Output < WINDOW_MIN) || ((unsigned int)Output < (millis() - PID_WinStartTime))) {
-        digitalWrite(RELAY_PIN_5V, LOW);
-        boilerStat = false;
-      } 
-      else {
-        if (boilerTemp < (Setpoint + 15)) {
-          digitalWrite(RELAY_PIN_5V, HIGH);  //Safety make sure boiler is not on if boilerTemp is more than 3 degreen higher than set
-          boilerStat = true;
-        }
+      // calculate pull start time
+      myTemp = millis() - pullOn;
+      
+      if (pullOn == 0) {
+        boilerControl(0);
+        testMode = 0;
       }
-      //***********************************************
+
+      // if Pulling shot and temp less than current target +1 (safety), add BrewingMinOn as offset to Output
+      if ((pullOn > 0) && (myTemp <= 5000) && (boilerTemp < (Setpoint + 1))) {
+        boilerControl(BrewingMinOn);
+        testMode = 1;
+      }
+      
+      // if pulling shot,  after 5 seconds add offset  to just 50% of BrewingMinOn since reached 9 bars pressure
+      if ((pullOn >0) && (myTemp > 5000) && (boilerTemp < (Setpoint + 1))) {
+        boilerControl(BrewingMinOn*0.5);
+        testMode = 2;
+      }
+      // *** Order important ends ***
+      // ***********************************************
       
       refreshScreen();
 
 
-      #ifdef DEBUG
+      #ifdef DEBUG1
       // Only print approximately every second
       if ((millis() % 1000) > 800) {
         Serial.print("Lifecycle:");
@@ -668,3 +677,27 @@ void loop(void) {
       // delay(50);  // sleep a little
   } // while (1)
 } // loop
+
+// ***********************************************************************
+// This routine is used to controller boiler relay based on PID controller
+void boilerControl(int offset) {
+      // make sure with offset it doesn't go pass the maximum window size.  
+      if ((Output + offset) > WINDOW_SIZE) offset = WINDOW_SIZE-Output;
+      boilerOffset = offset;
+      // Two safety checks.  
+      // safety check #1 - do not turn on boiler if temperature is > 305 degree.   The gaggia also has a temperature
+      // fuse that will cutoff power to broiler at 330 degree or so.  
+          if (boilerTemp > 305) Output = 0;
+          
+      // if PID output value > minimal turn on time && PID output > 
+      if (((unsigned int)(Output+offset) < WINDOW_MIN) || ((unsigned int)(Output+offset) < (millis() - PID_WinStartTime))) {
+        digitalWrite(RELAY_PIN_5V, LOW);
+        boilerStat = false;
+      } 
+      else {
+        if (boilerTemp < (Setpoint + 10)) {
+          digitalWrite(RELAY_PIN_5V, HIGH);  //Safety check #2 make sure boiler is not on if boilerTemp is more than 10 degreen higher than set
+          boilerStat = true;
+        }
+      }
+}
