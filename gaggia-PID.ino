@@ -21,18 +21,20 @@
 //*****************************************
 //****    User modifiable parameters   ****
 //*****************************************
-#define DEBUG  // Used to compile for serial output debug info
+// #define DEBUG  // Used to compile for serial output debug info
 #define PULL_MIN_THRESHHOLD 15000 // in milliseconds.  Must be this long before it is considered a shot pulled or shot counter increment
+#define BREW_BAND 3 // +- temperature range to turn on PID 
 //*****************************************
 
 // Conditional compile flag to add more features
 #define DISPLAY_TEMP
 
 // Global Define
-#define DEFAULT_KP 140   // default PID Kp value to initialize new board
-#define DEFAULT_KI 6    // default PID Ki value to initialize new board
+#define DEFAULT_KP 57   // default PID Kp value to initialize new board
+#define DEFAULT_KI 38    // default PID Ki value to initialize new board
 #define DEFAULT_KD 2    // default PID Kd value to initialize new board
-#define DEFAULT_BREWING_MIN_ON 300 // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
+#define DEFAULT_BREWING_MIN_ON 225 // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
+#define DEFAULT_STEAM_TEMP_TARGET 292  // target temperature for steam temp
 
 // EEPROM Address
 #define EE_LifeCycle_EEPROM_Addr 0   // EEPROM address for storage
@@ -41,6 +43,7 @@
 #define EE_PID_I 8   // EEPROM address for PID's I
 #define EE_PID_D 10  // EEPROM address for PID's D
 #define EE_BREWING_MIN_ON 12 // EEPROM address for DEFAULT_BREWING_MIN_ON
+#define EE_STEAM_TEMP 14 // EEPROM address for steam temp
 
 #define LINE1 65  // Power Minute Line
 #define LINE1_1 30  // PID legend line
@@ -52,7 +55,7 @@
 #define RNOMINAL  100.2  // MAX31865 nominal 0-degree-C resistance of sensor. 100.0 for PT100
 #define WINDOW_SIZE 1000  // Used to control relay slow PWM
 #define WINDOW_MIN 50 // minimum time to turn on Boiler is 0.05s
-#define STEAM_TEMP_TARGET 300  // target temperature for steam temp
+// #define STEAM_TEMP_TARGET 292  // target temperature for steam temp
 #define BREW_TEMP_TARGET_DEFAULT 220  // target tmperature for brewing temp
 
 // PIN definitions
@@ -67,6 +70,8 @@
 #define TEMP_SENSOR_CS_PIN 19 // Used for MAX31865
 #define RELAY_PIN_GND 18 // used to control heating element ground
 #define RELAY_PIN_5V 17 // used to control heating element
+#define STEAM_RELAY_PIN_GND 16 // used to control steam relay GND
+#define STEAM_RELAY_PIN_5V 15 // used to control steam relay +5V
 #define OLED_CS 10   // OLED Chip Select pin
 #define OLED_DC 9    // OLED DC pin
 #define OLED_RESET 8  // OLED Reset pin
@@ -86,14 +91,15 @@ int brewTempTarget;  // used to track last brew temperature before going to stea
 int boilerStat=0;  // status of relay to turn on boiler for display purposes
 int BrewingMinOn; // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
 int boilerOffset, testMode; // use for display only
+int steamTemp;  // steam temperature setting
 
 // QuickPID definition
 unsigned long PID_WinStartTime; // used for PID Relay PWM window calculation
 float Setpoint=0, Output=0; // USED for Quickpid
 //Specify the links and initial tuning parameters
 float Kp, Ki, Kd;
-float POn = 1.0;   // proportional on Error to Measurement ratio (0.0-1.0), default = 1.0
-float DOn = 0.0;   // derivative on Error to Measurement ratio (0.0-1.0), default = 0.0
+float POn = 0.5;   // proportional on Error to Measurement ratio (0.0-1.0), default = 1.0
+float DOn = 0.5;   // derivative on Error to Measurement ratio (0.0-1.0), default = 0.0
 QuickPID myQuickPID(&boilerTemp, &Output, &Setpoint, Kp, Ki, Kd, POn, DOn, QuickPID::DIRECT);
 
 // U8g2 Library Full Frame Buffer mode used (clock, data, cs and dc)
@@ -152,6 +158,12 @@ int readEEPROM()
     if (BrewingMinOn < 0 || BrewingMinOn > 2000) return(1);
     //if (BrewingMinOn < 0 || BrewingMinOn > 2000) EEPROM.put(EE_BREWING_MIN_ON, (int) DEFAULT_BREWING_MIN_ON);
 
+    // Read EEPROM Steam Temp
+    EEPROM.get(EE_STEAM_TEMP, temp); steamTemp= temp; // Casting here is important
+    // check for EEPROM steam temp in range
+    if (steamTemp < 0 || steamTemp > 330) return(1);
+    // if (steamTemp < 0 || steamTemp > 330) EEPROM.put(EE_STEAM_TEMP, (int) DEFAULT_STEAM_TEMP_TARGET);
+
     // Serial.println("EEPROM Reading successful");
     return(0);
 }
@@ -188,6 +200,10 @@ void setup(void) {
 
       // New board and new initialize BrewingMinOn
       EEPROM.put(EE_BREWING_MIN_ON, (int) DEFAULT_BREWING_MIN_ON);
+
+      // New board and new initialize Steam Temp
+      EEPROM.put(EE_STEAM_TEMP, (int) DEFAULT_STEAM_TEMP_TARGET);
+
 
       // Read it again
       if (readEEPROM() == 1) while (1);
@@ -235,6 +251,10 @@ void setup(void) {
     digitalWrite(RELAY_PIN_5V, LOW); // reset relay to 0
     pinMode(RELAY_PIN_GND, OUTPUT);  // Relay pin config
     digitalWrite(RELAY_PIN_GND, LOW); // reset relay to 0
+    pinMode(STEAM_RELAY_PIN_5V, OUTPUT); // Steam relay 5v config
+    digitalWrite(STEAM_RELAY_PIN_5V, HIGH); // Set Steam relay 5v to HIGH
+    pinMode(STEAM_RELAY_PIN_GND, OUTPUT); // Steam relay GND config
+    digitalWrite(STEAM_RELAY_PIN_GND, LOW); // Set Steam relay 5v to low
     PID_WinStartTime = millis();  // initialize Relay PWM window timer
     Setpoint = brewTempTarget;  // set default temperature target
     
@@ -309,6 +329,7 @@ void refreshScreen(void) {
     //     buttonConfig == 2 in I config mode
     //     buttonConfig == 3 in D config mode
     //     buttonConfig == 4 in BrewingMinON config mode
+    //     buttonConfig == 5 in Steam Temp config mode
     if (steamOn == 0 && pullOn == 0 && buttonConfig > 0) {
       // Not in steam or pulling shot and button configuration is ON
       
@@ -330,7 +351,7 @@ void refreshScreen(void) {
           u8g2.drawStr(60, LINE1_2, myString.c_str());  // set position and text to display
         }
   
-        // Display actual P value and flash it if it is being configured
+        // Display actual d value and flash it if it is being configured
         if (buttonConfig == 3 && ((millis() % 1000) < 500) || buttonConfig !=3) { 
           myString = (int) Kd;  
           u8g2.drawStr(100, LINE1_2, myString.c_str());  // set position and text to display
@@ -338,16 +359,23 @@ void refreshScreen(void) {
       }
 
       // Second Page
-      if (buttonConfig == 4) {
+      if (buttonConfig == 4 || buttonConfig == 5) {
         // display BrewingMinOn
         u8g2.setFont(u8g2_font_timB14_tf);  // 
-        u8g2.drawStr(0, LINE1_1, "  BMO      I      D");
+        u8g2.drawStr(0, LINE1_1, "BMO  Steam");
         
-        // Display actual P value and flash it if it is being configured
+        // Display actual BrewingMinOn value and flash it if it is being configured
         if (buttonConfig == 4 && ((millis() % 1000) < 500) || buttonConfig != 4) { 
           myString = (int) BrewingMinOn;  
           u8g2.drawStr(10, LINE1_2, myString.c_str());  // set position and text to display
         }
+
+        // Display actual Steam Temp value and flash it if it is being configured
+        if (buttonConfig == 5 && ((millis() % 1000) < 500) || buttonConfig != 5) { 
+          myString = (int) steamTemp;  
+          u8g2.drawStr(60, LINE1_2, myString.c_str());  // set position and text to display
+        }
+        
       } // if (buttonConfig == 4 ...
     } else buttonConfig = false;
 
@@ -399,18 +427,18 @@ void refreshScreen(void) {
     u8g2.drawStr(95, LINE2, myString.c_str());
 #endif
 
-    // Display Pull
+    // Display Boiler On %
     u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
-    // myString = String("Boiler");
-    myString = String("boiler");
+    myString = String("Boiler");
     u8g2.drawStr(0, LINE3, myString.c_str());
 
     // Display LifeCycle, calculate offset base on number of digit
     // myTemp2 = log10 (lifeCycle);
     // myString = String(lifeCycle);
-    myTemp2 = log10 (Output+boilerOffset);
-    myString = String((int)(Output+boilerOffset));
-    u8g2.drawStr((120-myTemp2*10), LINE3, myString.c_str());
+    if (Output+boilerOffset <= 1) myTemp2=2;  // if log10 is 0, need 2 space.
+      else myTemp2 = log10 (Output+boilerOffset)+1; // add 1 for % sign
+    myString = String((int)(Output+boilerOffset)*100/WINDOW_SIZE) + "%";
+    u8g2.drawStr((120-myTemp2*9), LINE3, myString.c_str());
 
     myString = String((int)testMode);  // debug
     u8g2.drawStr(60, LINE3, myString.c_str()); //debug
@@ -472,11 +500,6 @@ void loop(void) {
       if (digitalRead(PULLING_PIN) == LOW) {
         if (pullOn == 0) {
           pullOn = millis();   // Switch is ON - save off current millis value.  Only if the first time entering 
-          
-          /* // boost p term PID controller to react faster
-          Kp = Kp * 2;  // Boost P & D
-          Kd = Kd * 2;  //   
-          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);  */
         }
       } else {
         // Switch is OFF
@@ -489,13 +512,7 @@ void loop(void) {
         }
         
         // save off lastPull & reset PID
-        if (pullOn !=0 ) {
-          /*
-          // restore PID's P & D term to previous value
-          EEPROM.get(EE_PID_P, temp);  Kp = temp;  // Casting here is important
-          EEPROM.get(EE_PID_D, temp); Kd = temp; // Casting here is important
-          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);  */
-           
+        if (pullOn !=0 ) {           
           // if shot is < 18 (PULL_MIN_THRESHHOLD)  seconds, most like flushing group head or steam wond.  Don't display the short pull
           if ((millis() - pullOn) > PULL_MIN_THRESHHOLD)
             lastPull = millis() - pullOn;
@@ -507,19 +524,33 @@ void loop(void) {
 
       // Detect Steaming on
       if (digitalRead(STEAM_PIN) == HIGH) {
-        if (steamOn == 0) steamOn = millis();  // Steam is on - save off current millis value.  Only first time entering
-        
-        // set PID setpoint target to new steam temperature
-        Setpoint = STEAM_TEMP_TARGET;
-
+        if (steamOn == 0) {
+          // First time detecting steam on
+          steamOn = millis();  // Steam is on - save off current millis value.  Only first time entering
+          
+          // set PID setpoint target to new steam temperature
+          Setpoint = steamTemp;
+  
+          // Set Steam PID
+          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+        }
         
       } else {
-        
-        // set PID setpoint target to new steam temperature
-        Setpoint = brewTempTarget;
-        
-        // switch is off.  Reset switchOn
-        steamOn = 0;
+        // steam is now off
+        if (steamOn > 0) { 
+          // transitioning from steam On to steam OFF
+          // set PID setpoint target to new steam temperature
+          Setpoint = brewTempTarget;
+          
+          // switch is off.  Reset switchOn
+          steamOn = 0;
+  
+          // Turn steam relay on.  
+          digitalWrite(STEAM_RELAY_PIN_5V, HIGH);
+  
+          // Set Brew PID
+          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+        }
       }
 
       // rotary encoder detection
@@ -542,35 +573,31 @@ void loop(void) {
 
             case 1:
               // if buttonConfig == 1 change PID_P by 1
-              Kp = Kp + (float) (encoder->getDirection());
-
-              // save off in EEPROM
-              EEPROM.put(EE_PID_P, (int)Kp);  
+              Kp = Kp + (float) (encoder->getDirection()); 
             break;
 
             case 2:
               // if buttonConfig == 2 change PID_I by 1
-              Ki = Ki + (float) (encoder->getDirection());
-
-              // save off in EEPROM
-              EEPROM.put(EE_PID_I, (int)Ki);  
+              Ki = Ki + (float) (encoder->getDirection()); 
             break;
 
             case 3:
               // if buttonConfig == 3 change PID_D by 1
               Kd = Kd + (float) (encoder->getDirection());
-
-              // save off in EEPROM
-              EEPROM.put(EE_PID_D, (int)Kd); 
             break;
 
             case 4:
               // if buttonConfig == 4 change BrewingMinOn by 50
-              if (encoder->getDirection() == RotaryEncoder::Direction::CLOCKWISE) BrewingMinOn = BrewingMinOn + 25;
-              else BrewingMinOn = BrewingMinOn - 25;
+              if (encoder->getDirection() == RotaryEncoder::Direction::CLOCKWISE) BrewingMinOn = BrewingMinOn + 5;
+              else BrewingMinOn = BrewingMinOn - 5;
+            break;
 
-              // save off in EEPROM
-              EEPROM.put(EE_BREWING_MIN_ON, (int)BrewingMinOn); 
+            
+            case 5:
+              // if buttonConfig == 5 change temperature by 1 degree 
+              if (steamOn == 0){
+                steamTemp = steamTemp + (float) (encoder->getDirection()); 
+              }
             break;
           }
 
@@ -587,7 +614,14 @@ void loop(void) {
         buttonTime = millis();
 
         // button config mode on & increment to next stage
-        buttonConfig = (buttonConfig + 1) % 5; // cycle through 0-4 ONLY while always increase by 1
+        buttonConfig = (buttonConfig + 1) % 6; // cycle through 0-4 ONLY while always increase by 1
+
+        // safe all EEPROM.  If it has not change, put will not do the actual write.
+        EEPROM.put(EE_PID_P, (int)Kp); 
+        EEPROM.put(EE_PID_I, (int)Ki); 
+        EEPROM.put(EE_PID_D, (int)Kd); 
+        EEPROM.put(EE_BREWING_MIN_ON, (int)BrewingMinOn); 
+        EEPROM.put(EE_STEAM_TEMP, (int)steamTemp); 
       }
 
       // Update temperature
@@ -604,7 +638,52 @@ void loop(void) {
           #endif
   
           PID_WinStartTime += WINDOW_SIZE;
-          myQuickPID.Compute();
+
+          // if current emp is within +- BREW_BAND degrees turn on PID. (Use only during steam and when pulling shots
+          //   This is needed when getting hot water to turn heater on at 100% if temp dip below 5 degree
+          /*  
+            if ((abs(Setpoint-boilerTemp) < BREW_BAND) || (boilerTemp < 250)) 
+            #ifdef DEBUG  
+            Serial.println("A ");
+            #endif
+            
+            // if PID is manual, turn it on first
+            // Output=0;
+            if (myQuickPID.GetMode() == QuickPID::MANUAL) {
+              Output=0;
+              myQuickPID.SetMode(QuickPID::AUTOMATIC);
+            }
+            
+            // compute PID
+            myQuickPID.Compute();*/
+          if ((abs(Setpoint-boilerTemp) > BREW_BAND) && ((boilerTemp > 250) || (pullOn >0))) {
+            #ifdef DEBUG  
+            Serial.println("M ");
+            #endif
+            
+            myQuickPID.SetMode(QuickPID::MANUAL);
+            
+            // outside of temperature range, just turn boiler on or off
+            if (Setpoint > boilerTemp) Output = WINDOW_SIZE;
+             else Output = 0;
+          } else {
+
+                        
+            #ifdef DEBUG  
+            Serial.println("A ");
+            #endif
+            
+            // if PID is manual, turn it on first
+            // Output=0;
+            if (myQuickPID.GetMode() == QuickPID::MANUAL) {
+              Output=0;
+              myQuickPID.SetMode(QuickPID::AUTOMATIC);
+            }
+            
+            // compute PID
+            myQuickPID.Compute();
+          }
+
         }
 
       // ***********************************************
@@ -617,19 +696,37 @@ void loop(void) {
       
       if (pullOn == 0) {
         boilerControl(0);
+        
         testMode = 0;
       }
 
       // if Pulling shot and temp less than current target +1 (safety), add BrewingMinOn as offset to Output
-      if ((pullOn > 0) && (myTemp <= 5000) && (boilerTemp < (Setpoint + 1))) {
-        boilerControl(BrewingMinOn);
+      if ((pullOn > 0) && (myTemp <= 5000)){ 
+        if (boilerTemp <= (Setpoint+1)) {
+          boilerControl(BrewingMinOn);
+        } else boilerControl(0);
+        
         testMode = 1;
-      }
+      } 
       
       // if pulling shot,  after 5 seconds add offset  to just 50% of BrewingMinOn since reached 9 bars pressure
-      if ((pullOn >0) && (myTemp > 5000) && (boilerTemp < (Setpoint + 1))) {
-        boilerControl(BrewingMinOn*0.5);
+      if ((pullOn >0) && (myTemp > 5000) && (myTemp <= 12000)) {
+        // Check if we are in the > 1 about Setpoint, if yes, turn off offset.  
+        if (boilerTemp < (Setpoint+1)) boilerControl(0);
+        else
+          boilerControl(0);
+          
         testMode = 2;
+      }
+
+      // if pulling shot,  after 9 seconds add offset  to just 125% of BrewingMinOn since reached 9 bars pressure
+      if ((pullOn >0) && (myTemp > 9000)) {
+        // Check if we are in the > 1 about Setpoint, if yes, turn off offset.  
+        if (boilerTemp < (Setpoint+1)) boilerControl(BrewingMinOn*0.6);
+        else
+          boilerControl(0);
+          
+        testMode = 3;
       }
       // *** Order important ends ***
       // ***********************************************
@@ -687,17 +784,25 @@ void boilerControl(int offset) {
       // Two safety checks.  
       // safety check #1 - do not turn on boiler if temperature is > 305 degree.   The gaggia also has a temperature
       // fuse that will cutoff power to broiler at 330 degree or so.  
-          if (boilerTemp > 305) Output = 0;
+      // if (boilerTemp > 305) Output = 0;
           
       // if PID output value > minimal turn on time && PID output > 
       if (((unsigned int)(Output+offset) < WINDOW_MIN) || ((unsigned int)(Output+offset) < (millis() - PID_WinStartTime))) {
-        digitalWrite(RELAY_PIN_5V, LOW);
+
+        // if steam is ON control the stream relay instead of brew relay
+        if (steamOn > 0) digitalWrite(STEAM_RELAY_PIN_5V, LOW);
+        else {
+          // use brewing heater relay instead.
+          digitalWrite(RELAY_PIN_5V, LOW);
+        }
         boilerStat = false;
       } 
       else {
-        if (boilerTemp < (Setpoint + 10)) {
+        // if steam is ON control the stream relay instead of brew relay
+        if (steamOn > 0) digitalWrite(STEAM_RELAY_PIN_5V, HIGH);
+        else {
           digitalWrite(RELAY_PIN_5V, HIGH);  //Safety check #2 make sure boiler is not on if boilerTemp is more than 10 degreen higher than set
-          boilerStat = true;
         }
+        boilerStat = true;
       }
 }
