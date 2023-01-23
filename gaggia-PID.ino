@@ -21,7 +21,7 @@
 //*****************************************
 //****    User modifiable parameters   ****
 //*****************************************
-// #define DEBUG  // Used to compile for serial output debug info
+//#define DEBUG  // Used to compile for serial output debug info
 #define PULL_MIN_THRESHHOLD 15000 // in milliseconds.  Must be this long before it is considered a shot pulled or shot counter increment
 #define BREW_BAND 3 // +- temperature range to turn on PID 
 //*****************************************
@@ -57,6 +57,11 @@
 #define WINDOW_MIN 50 // minimum time to turn on Boiler is 0.05s
 // #define STEAM_TEMP_TARGET 292  // target temperature for steam temp
 #define BREW_TEMP_TARGET_DEFAULT 220  // target tmperature for brewing temp
+#define GAGGIA_TEMP_OFFSET 15 // Gaggia boiler to head temp offset
+#define HOT_WATER_HEATER_BASELINE 260 // when detecting hot water, add this amount to heating window
+#define HOT_WATER_STG1 0.45  // multiplier to HOT_WATER_HEATER_BASELINE during stage 1
+#define HOT_WATER_STG2 0.8 // multiplier to HOT_WATER_HEATER_BASELINE during stage 2
+#define HOT_WATER_STG3 1.2  // multiplier to HOT_WATER_HEATER_BASELINE during stage 3
 
 // PIN definitions
 #define PULLING_GROUND   2  // used for shot detection +5V to switch to PULLING_PIN
@@ -83,7 +88,9 @@ float boilerTemp=0;
 long int myTemp1, myTemp2;
 String myString;   // temp string
 unsigned long pullOn = LOW;  // Pulling Shot Button ON
+int prevPullOn = 0; //indicate previous PullOn is < 10 sec so it is a hot water.   
 unsigned long lastPull = 0; // last pull time
+unsigned long lastPullTimeStamp = 0; // last pull time
 unsigned long steamOn = 0; // steam turn on time
 unsigned long buttonTime = 0;  // Time stamp of when last button press 
 int buttonConfig = false; // used to indicate button configuration is ON
@@ -273,7 +280,7 @@ void refreshScreen(void) {
     u8g2.clearBuffer();  // Clear Oled display
 
     // Check if in pulling shot display mode
-    if (pullOn > 0) {
+    if (pullOn > 0 && steamOn==0) {  // check if pulling is on and make sure steam is not also on for hot water mode.
         // Display shot timer when it is pulling shot
         // Display PullOn Symbol
         u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
@@ -417,13 +424,21 @@ void refreshScreen(void) {
     }
 
     // Display Actual temperature
-    myString = String((int)boilerTemp) + "\xb0"; // add degree symbol
+    if (steamOn > 0) {  //  if steam is on, don't use tem offset.  
+      myString = String((int)(boilerTemp)) + "\xb0"; // add degree symbol
+    } else {
+      myString = String((int)(boilerTemp-GAGGIA_TEMP_OFFSET)) + "\xb0"; // add degree symbol
+    }
     u8g2.setFont(u8g2_font_timB24_tf);  // Choose font to use
     u8g2.drawStr(25, LINE2, myString.c_str());
 
     // Display Target Temp
     u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
-    myString = String((int) Setpoint) + "\xb0";
+    if (steamOn > 0) {  //  if steam is on, don't use tem offset.  
+      myString = String((int) (Setpoint)) + "\xb0";
+    } else {
+       myString = String((int) (Setpoint-GAGGIA_TEMP_OFFSET)) + "\xb0";
+    }
     u8g2.drawStr(95, LINE2, myString.c_str());
 #endif
 
@@ -441,6 +456,8 @@ void refreshScreen(void) {
     u8g2.drawStr((120-myTemp2*9), LINE3, myString.c_str());
 
     myString = String((int)testMode);  // debug
+    //myString = String((int)prevPullOn);  // debug
+    
     u8g2.drawStr(60, LINE3, myString.c_str()); //debug
 
     // Display lastPull time if we are not pulling shot or steaming and in button config mode.  
@@ -499,27 +516,33 @@ void loop(void) {
       // Read if Pulling Switching is ON - LOW is ON because pin is PULLUP
       if (digitalRead(PULLING_PIN) == LOW) {
         if (pullOn == 0) {
+          // this code is ran once after the pull switch is on.  
           pullOn = millis();   // Switch is ON - save off current millis value.  Only if the first time entering 
+
+          // If the previous pull was less than 35s ago assume this is a hot water pull
+          if ((pullOn - lastPullTimeStamp) < 35000) {
+            prevPullOn = 1; 
+          } else {
+            prevPullOn = 0; 
+           }
         }
-      } else {
+        } else {
         // Switch is OFF
-        //Check if we need to increment poll counter if it is > 18 seconds (PULL_MIN_THRESHHOLD)
-        if (pullOn != 0 && (millis()-pullOn) > PULL_MIN_THRESHHOLD) {
+
+        
+        //Check if we need to increment poll counter if it is > 15 seconds (PULL_MIN_THRESHHOLD)
+        if (pullOn != 0 && (millis()-pullOn) > PULL_MIN_THRESHHOLD && prevPullOn == 0) {
           // Increment Poll counter
           lifeCycle = lifeCycle + 1;
           // write to EEProm
           EEPROM.put(EE_LifeCycle_EEPROM_Addr, (long int) lifeCycle); 
-        }
-        
-        // save off lastPull & reset PID
-        if (pullOn !=0 ) {           
-          // if shot is < 18 (PULL_MIN_THRESHHOLD)  seconds, most like flushing group head or steam wond.  Don't display the short pull
-          if ((millis() - pullOn) > PULL_MIN_THRESHHOLD)
-            lastPull = millis() - pullOn;
+
+          lastPullTimeStamp = millis();  // safe off timestamp when last pull finished.  
+          lastPull = lastPullTimeStamp - pullOn;
         }
         
         // reset pullOn
-        pullOn = 0;      
+        pullOn = 0;    
       }
 
       // Detect Steaming on
@@ -532,7 +555,7 @@ void loop(void) {
           Setpoint = steamTemp;
   
           // Set Steam PID
-          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+          // myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
         }
         
       } else {
@@ -549,7 +572,7 @@ void loop(void) {
           digitalWrite(STEAM_RELAY_PIN_5V, HIGH);
   
           // Set Brew PID
-          myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+          // myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
         }
       }
 
@@ -656,7 +679,7 @@ void loop(void) {
             
             // compute PID
             myQuickPID.Compute();*/
-          if ((abs(Setpoint-boilerTemp) > BREW_BAND) && ((boilerTemp > 250) || (pullOn >0))) {
+          /* if ((abs(Setpoint-boilerTemp) > BREW_BAND) && ((boilerTemp > 250) || (pullOn >0))) {
             #ifdef DEBUG  
             Serial.println("M ");
             #endif
@@ -664,25 +687,33 @@ void loop(void) {
             myQuickPID.SetMode(QuickPID::MANUAL);
             
             // outside of temperature range, just turn boiler on or off
-            if (Setpoint > boilerTemp) Output = WINDOW_SIZE;
+            // if (Setpoint > boilerTemp) Output = WINDOW_SIZE;
+            if (Setpoint > boilerTemp) Output = Output + (WINDOW_SIZE/2);
              else Output = 0;
           } else {
 
                         
             #ifdef DEBUG  
             Serial.println("A ");
-            #endif
+            #endif   
             
             // if PID is manual, turn it on first
             // Output=0;
-            if (myQuickPID.GetMode() == QuickPID::MANUAL) {
-              Output=0;
-              myQuickPID.SetMode(QuickPID::AUTOMATIC);
-            }
+            // if (myQuickPID.GetMode() == QuickPID::MANUAL) {
+            //   Output=0;
+            
+            // myQuickPID.SetMode(QuickPID::AUTOMATIC);
+            // } */ 
+
+            /* // Set Brew PID
+            if (pullOn > 0 && (millis()-pullOn) > 9) {
+              myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+            } else {
+              myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
+            } */
             
             // compute PID
             myQuickPID.Compute();
-          }
 
         }
 
@@ -700,29 +731,29 @@ void loop(void) {
         testMode = 0;
       }
 
-      // if Pulling shot and temp less than current target +1 (safety), add BrewingMinOn as offset to Output
+      // if Pulling shot and temp less than current target + 10 (safety), add BrewingMinOn as offset to Output
       if ((pullOn > 0) && (myTemp <= 5000)){ 
-        if (boilerTemp <= (Setpoint+1)) {
-          boilerControl(BrewingMinOn);
+        if (boilerTemp <= (Setpoint+10)) {
+          boilerControl(BrewingMinOn+prevPullOn*HOT_WATER_HEATER_BASELINE*HOT_WATER_STG1);
         } else boilerControl(0);
         
         testMode = 1;
       } 
       
       // if pulling shot,  after 5 seconds add offset  to just 50% of BrewingMinOn since reached 9 bars pressure
-      if ((pullOn >0) && (myTemp > 5000) && (myTemp <= 12000)) {
-        // Check if we are in the > 1 about Setpoint, if yes, turn off offset.  
-        if (boilerTemp < (Setpoint+1)) boilerControl(0);
+      if ((pullOn >0) && (myTemp > 5000) && (myTemp <= 9000)) {
+        // Check if we are in the > 10 about Setpoint, if yes, turn off offset.  
+        if (boilerTemp < (Setpoint+10)) boilerControl(BrewingMinOn*0.5+prevPullOn*HOT_WATER_HEATER_BASELINE*HOT_WATER_STG2);
         else
           boilerControl(0);
           
         testMode = 2;
       }
 
-      // if pulling shot,  after 9 seconds add offset  to just 125% of BrewingMinOn since reached 9 bars pressure
+      // if pulling shot,  after 9 seconds add offset  to just 75% of BrewingMinOn since reached 9 bars pressure
       if ((pullOn >0) && (myTemp > 9000)) {
         // Check if we are in the > 1 about Setpoint, if yes, turn off offset.  
-        if (boilerTemp < (Setpoint+1)) boilerControl(BrewingMinOn*0.6);
+        if (boilerTemp < (Setpoint+10)) boilerControl(BrewingMinOn*0.75+prevPullOn*HOT_WATER_HEATER_BASELINE*HOT_WATER_STG3);
         else
           boilerControl(0);
           
@@ -734,7 +765,7 @@ void loop(void) {
       refreshScreen();
 
 
-      #ifdef DEBUG1
+      #ifdef DEBUG
       // Only print approximately every second
       if ((millis() % 1000) > 800) {
         Serial.print("Lifecycle:");
