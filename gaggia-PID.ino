@@ -22,6 +22,7 @@
 //****    User modifiable parameters   ****
 //*****************************************
 //#define DEBUG  // Used to compile for serial output debug info
+//#define PRESSURE_CHART // Whether to display graphic chart of pressure setting.
 #define PULL_MIN_THRESHHOLD 15000 // in milliseconds.  Must be this long before it is considered a shot pulled or shot counter increment
 #define BREW_BAND 3 // +- temperature range to turn on PID 
 //*****************************************
@@ -30,10 +31,10 @@
 #define DISPLAY_TEMP
 
 // Global Define
-#define DEFAULT_KP 57   // default PID Kp value to initialize new board
-#define DEFAULT_KI 38    // default PID Ki value to initialize new board
+#define DEFAULT_KP 58   // default PID Kp value to initialize new board
+#define DEFAULT_KI 32    // default PID Ki value to initialize new board
 #define DEFAULT_KD 2    // default PID Kd value to initialize new board
-#define DEFAULT_BREWING_MIN_ON 225 // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
+#define DEFAULT_BREWING_MIN_ON 205 // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
 #define DEFAULT_STEAM_TEMP_TARGET 292  // target temperature for steam temp
 
 // EEPROM Address
@@ -68,7 +69,7 @@
 #define STEAM_PIN 6 // Steam detction.  Ground connected to ground pin #2
 #define ROTARY_ENCODER_PIN1  3  // Used for ISR for rotary knob
 #define ROTARY_ENCODER_PIN2  4  // used for ISR for rotary knob
-#define ROTARY_GROUND 5 // used for rotary knob ground
+#define WATER_PUMP_PWM 5 // used for rotary knob ground
 #define PULLING_PIN 7 // Pulling shot detection +5
 #define BUTTON_PIN 20 // used to detect rotary encoder button press
 #define BUTTON_GND 21 // used for ground
@@ -81,7 +82,7 @@
 #define OLED_DC 9    // OLED DC pin
 #define OLED_RESET 8  // OLED Reset pin
 
-// Glogal Variable
+// *** Glogal Variable
 long int lifeCycle = 0;  
 // int targetTemp = 200; 
 float boilerTemp=0;
@@ -99,8 +100,38 @@ int boilerStat=0;  // status of relay to turn on boiler for display purposes
 int BrewingMinOn; // Define in ms when pulling shots the min boiler on time > 100 and < 2000 (WINDOW_SIZE)
 int boilerOffset, testMode; // use for display only
 int steamTemp;  // steam temperature setting
+int pumpDutyCycle = 255; // pump duty cycle
+int myBar = 9; // current bar pressure.
+byte UIChangeMode =0; // use to indicate know is to change bar target 1=bar mode, 2 =setup, 3=temp change mode
+int prevSteamBar=0; // used to save off manual mode latest bar setting before steam overide to 9bar
 
-// QuickPID definition
+// *** Profile definitions
+struct pumpProfile{ // pumpProfile
+    String myName; // no more than 5 char
+    String text1; // Description 1
+    String text2; // Description 2
+    byte sec[5];  // #secs to take action.  255 means end
+    byte bar[5]; // # bars to set with when designated sec hit.  
+}; 
+
+#define MAX_PROFILE 5
+pumpProfile profile[MAX_PROFILE] = {  // full profile
+  {"Pre+9", "Preinfusion 1b for 10s", "9 bars after", {0,9,10,11,255}, {2,3,5,9,0}},
+  {"9 Bar", "Constant 9 bars", "Only", {0,255,255,255,255}, {9,0,0,0,0}},
+  {"SProv", "Sprover 1:10 ratio", "Low temp 196 - 75s", {0,255,255,255,255}, {2,0,0,0,0}}, 
+  {"Turbo", "Turbo - 6 bar, 16s", "Corser 80% bean, 1:3", {0,255,255,255,255}, {6,0,0,0,0}},
+  {"Manul", "Manual at 0 bars", "Push to setup pressure", {0,255,255,255,255}, {0,0,0,0,0}} // zero in bar means don't overide manual at start
+  // {"Gradl", {0,7,10,13,16}, {3,9,8,6,3}}
+};
+
+// bar to duty cycle conversion table, 0-9 bars
+// byte barToDuty[10] = {0,120,135,150,170,190,200,210,220,255}; 
+byte barToDuty[10] = {0,120,138,150,170,190,200,210,220,255}; 
+
+int myProfile = 0;
+int profileStage = 0; 
+
+// *** QuickPID definition
 unsigned long PID_WinStartTime; // used for PID Relay PWM window calculation
 float Setpoint=0, Output=0; // USED for Quickpid
 //Specify the links and initial tuning parameters
@@ -223,9 +254,9 @@ void setup(void) {
     pinMode(PULLING_GROUND, OUTPUT);
     digitalWrite(PULLING_GROUND, LOW);
 
-    // Use extra ground pin for rotary encoder
-    pinMode(ROTARY_GROUND, OUTPUT);
-    digitalWrite(ROTARY_GROUND, LOW);   
+    // Setup WATER PUMP PWM output
+    pinMode(WATER_PUMP_PWM, OUTPUT);
+    setPressure(profile[myProfile].bar[0]);  //set initial pressure to profile default
 
     // Setup digital Steam Switch IN with pullup.  0 means Steam is ON
     pinMode(STEAM_PIN, INPUT);
@@ -282,16 +313,37 @@ void refreshScreen(void) {
     // Check if in pulling shot display mode
     if (pullOn > 0 && steamOn==0) {  // check if pulling is on and make sure steam is not also on for hot water mode.
         // Display shot timer when it is pulling shot
-        // Display PullOn Symbol
-        u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
-        u8g2.drawGlyph(0, 60, 67);  //Power
+
+#ifndef PRESSURE_CHART
+        if (prevPullOn == 0) {  
+          // Display PullOn Symbol since it is not Hot Water run
+          u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
+          u8g2.drawGlyph(0, 60, 67);  //Power 
+        } else {
+          // Display Hot Water symbol Symbol
+          u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
+          u8g2.drawGlyph(0, 60, 77);  // Hot water
+        }
+#endif
+
+#ifdef PRESSURE_CHART
+        // Draw pressure box
+        u8g2.drawLine(0,0,60,0);
+        u8g2.drawLine(60,0,60,27);
+        u8g2.drawLine(0,27,60,27);
+        u8g2.drawLine(0,0,0,27);
+        
+        // Draw 3 bar, 6 bar 9 bar
+        u8g2.drawLine(0,18,60,18);
+        u8g2.drawLine(0,9,60,9);
+#endif
 
         // Display Pullon Second unit
         u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
         u8g2.drawStr(97, LINE1, "sec");
 
         // Display actual elapsed sec
-        myString = ((millis() - pullOn) / 1000) % 100;  // figure out number of sec after pulling shot. Max 2 digit
+        myString = String((((millis() - pullOn) / 1000) % 100));  // figure out number of sec after pulling shot. Max 2 digit
     
         // calculate text space if it is 2 digit or 3 digit
         if (myString.length() == 1) {
@@ -317,7 +369,7 @@ void refreshScreen(void) {
         u8g2.drawStr(97, LINE1, "sec");
 
         // Display actual elapsed sec
-        myString = ((millis() - steamOn) / 1000) % 100;  // figure out number of sec after pulling shot. Max 2 digit
+        myString = String(((millis() - steamOn) / 1000) % 100);  // figure out number of sec after pulling shot. Max 2 digit
     
         // calculate text space if it is 2 digit or 3 digit
         if (myString.length() == 1) {
@@ -337,6 +389,7 @@ void refreshScreen(void) {
     //     buttonConfig == 3 in D config mode
     //     buttonConfig == 4 in BrewingMinON config mode
     //     buttonConfig == 5 in Steam Temp config mode
+    //     buttonConfig == 6 in Boiler Temp config mode
     if (steamOn == 0 && pullOn == 0 && buttonConfig > 0) {
       // Not in steam or pulling shot and button configuration is ON
       
@@ -348,39 +401,45 @@ void refreshScreen(void) {
         
         // Display actual P value and flash it if it is being configured
         if (buttonConfig == 1 && ((millis() % 1000) < 500) || buttonConfig != 1) { 
-          myString = (int) Kp;  
+          myString = String(int(Kp));  
           u8g2.drawStr(20, LINE1_2, myString.c_str());  // set position and text to display
         }
   
         // Display actual I value and flash it if it is being configured
         if (buttonConfig == 2 && ((millis() % 1000) < 500) || buttonConfig !=2) { 
-          myString = (int) Ki;  
+          myString = String(int(Ki));  
           u8g2.drawStr(60, LINE1_2, myString.c_str());  // set position and text to display
         }
   
         // Display actual d value and flash it if it is being configured
         if (buttonConfig == 3 && ((millis() % 1000) < 500) || buttonConfig !=3) { 
-          myString = (int) Kd;  
+          myString = String(int(Kd));  
           u8g2.drawStr(100, LINE1_2, myString.c_str());  // set position and text to display
         }
       }
 
       // Second Page
-      if (buttonConfig == 4 || buttonConfig == 5) {
+      if (buttonConfig == 4 || buttonConfig == 5 || buttonConfig == 6) {
         // display BrewingMinOn
         u8g2.setFont(u8g2_font_timB14_tf);  // 
-        u8g2.drawStr(0, LINE1_1, "BMO  Steam");
+        u8g2.drawStr(0, LINE1_1, "BMO STP BTP");
         
         // Display actual BrewingMinOn value and flash it if it is being configured
         if (buttonConfig == 4 && ((millis() % 1000) < 500) || buttonConfig != 4) { 
-          myString = (int) BrewingMinOn;  
+          myString = String(int(BrewingMinOn));  
           u8g2.drawStr(10, LINE1_2, myString.c_str());  // set position and text to display
         }
 
         // Display actual Steam Temp value and flash it if it is being configured
         if (buttonConfig == 5 && ((millis() % 1000) < 500) || buttonConfig != 5) { 
-          myString = (int) steamTemp;  
-          u8g2.drawStr(60, LINE1_2, myString.c_str());  // set position and text to display
+          myString = String(int(steamTemp));  
+          u8g2.drawStr(55, LINE1_2, myString.c_str());  // set position and text to display
+        }
+        
+        // Display actual Boiler Temp value and flash it if it is being configured
+        if (buttonConfig == 6 && ((millis() % 1000) < 500) || buttonConfig != 6) { 
+          myString = String(int(brewTempTarget-GAGGIA_TEMP_OFFSET));  
+          u8g2.drawStr(95, LINE1_2, myString.c_str());  // set position and text to display
         }
         
       } // if (buttonConfig == 4 ...
@@ -394,8 +453,16 @@ void refreshScreen(void) {
         // flash power symbol once every 0.5 seconds if warming        
         if (millis() > 900000 || (millis() % 1000 < 500)) {
           // Display Power Symbole
-          u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
-          u8g2.drawGlyph(0, 60, 78);  //Power 
+          if (((millis() - lastPullTimeStamp) > 35000) || lastPullTimeStamp == 0){
+            // No longer in hot water mode so display normal power symbole
+            u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
+            u8g2.drawGlyph(0, 60, 78);  //Power
+          } else {
+            // Still in Hot Water Mode display hot water symbol
+            u8g2.setFont(u8g2_font_open_iconic_embedded_4x_t);  // Choose font to use
+            u8g2.drawGlyph(0, 60, 77);  //Power
+          }
+ 
         }
     
         // Display Power-up time Unit
@@ -403,7 +470,7 @@ void refreshScreen(void) {
         u8g2.drawStr(97, LINE1, "min");
     
         // Display actual elapsed min
-        myString = ((millis() / 60000) % 100) ;  // figure out number of min since power up.  /1000/60. Modulo 100 to only display 2 digit
+        myString = String(((millis() / 60000) % 100) );  // figure out number of min since power up.  /1000/60. Modulo 100 to only display 2 digit
     
         // calculate text space if it is 2 digit or 3 digit
         if (myString.length() == 1) {
@@ -433,18 +500,23 @@ void refreshScreen(void) {
     u8g2.drawStr(25, LINE2, myString.c_str());
 
     // Display Target Temp
-    u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
-    if (steamOn > 0) {  //  if steam is on, don't use tem offset.  
-      myString = String((int) (Setpoint)) + "\xb0";
-    } else {
-       myString = String((int) (Setpoint-GAGGIA_TEMP_OFFSET)) + "\xb0";
+    // flash this value if it is under mod mode.  
+    if (UIChangeMode != 3 || ((millis() % 1000) < 500)){
+      u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
+      if (steamOn > 0) {  //  if steam is on, don't use tem offset.  
+        myString = String((int) (Setpoint)) + "\xb0";
+      } else {
+         myString = String ((int) (Setpoint-GAGGIA_TEMP_OFFSET)) + "\xb0";
+      }
+      u8g2.drawStr(95, LINE2, myString.c_str());
     }
-    u8g2.drawStr(95, LINE2, myString.c_str());
 #endif
 
     // Display Boiler On %
     u8g2.setFont(u8g2_font_timB14_tf);  // Choose font to use
-    myString = String("Boiler");
+    // myString = String("Boiler"); yyy
+    myString = profile[myProfile].myName;  // display profile name
+
     u8g2.drawStr(0, LINE3, myString.c_str());
 
     // Display LifeCycle, calculate offset base on number of digit
@@ -455,16 +527,21 @@ void refreshScreen(void) {
     myString = String((int)(Output+boilerOffset)*100/WINDOW_SIZE) + "%";
     u8g2.drawStr((120-myTemp2*9), LINE3, myString.c_str());
 
-    myString = String((int)testMode);  // debug
-    //myString = String((int)prevPullOn);  // debug
-    
-    u8g2.drawStr(60, LINE3, myString.c_str()); //debug
+    // flash this value if it is under mod mode.  
+    if (UIChangeMode != 1 || ((millis() % 1000) < 500)){
+      myString = String((int)myBar)+"b";  // debug xxx
+      // myString = String((int)pumpDutyCycle);  // debug
+      // myString = String((int)testMode);  // debug
+      //myString = String((int)prevPullOn);  // debug
+      
+      u8g2.drawStr(60, LINE3, myString.c_str()); //debug
+    }
 
     // Display lastPull time if we are not pulling shot or steaming and in button config mode.  
     if (!(steamOn == 0 && pullOn == 0 && buttonConfig > 0)) {
       if (lastPull != 0) {
          // Display last pull time
-          myString = (lastPull / 1000) % 100;  // figure out number of sec after pulling shot. Max 2 digit
+          myString = String((lastPull / 1000) % 100);  // figure out number of sec after pulling shot. Max 2 digit
       
           // calculate text space if it is 2 digit or 3 digit
           if (myString.length() == 1) {
@@ -495,7 +572,7 @@ void startupScreen(void) {
     u8g2.drawStr(0, 65, "Life Pull");
  
     // Display actual value
-    myString = lifeCycle;
+    myString = String(lifeCycle);
     // lifeCycle = millis() & 200000;  // test
     // myString = lifeCycle;  // test
     myTemp2 = log10 (lifeCycle);
@@ -520,10 +597,15 @@ void loop(void) {
           pullOn = millis();   // Switch is ON - save off current millis value.  Only if the first time entering 
 
           // If the previous pull was less than 35s ago assume this is a hot water pull
-          if ((pullOn - lastPullTimeStamp) < 35000) {
-            prevPullOn = 1; 
+          if (((pullOn - lastPullTimeStamp) < 35000) && millis() > 35000) {
+            prevPullOn = 1;
+
+            // set pressure to 9 since it is a hot water run but save off previous value used in manual
+            prevSteamBar=myBar;
+            setPressure(9);
           } else {
             prevPullOn = 0; 
+            profileStage = 0;
            }
         }
         } else {
@@ -543,7 +625,19 @@ void loop(void) {
         
         // reset pullOn
         pullOn = 0;    
-      }
+
+        // restore last previous steam Bar setting before steaming yyy
+        if (prevSteamBar) {
+          if (profile[myProfile].bar[0]==0) {
+            setPressure(prevSteamBar);
+          }else {
+            setPressure(profile[myProfile].bar[0]);
+          }
+
+          // reset flag
+          prevSteamBar = 0;
+        }
+      } 
 
       // Detect Steaming on
       if (digitalRead(STEAM_PIN) == HIGH) {
@@ -553,7 +647,7 @@ void loop(void) {
           
           // set PID setpoint target to new steam temperature
           Setpoint = steamTemp;
-  
+          
           // Set Steam PID
           // myQuickPID.SetTunings(Kp, Ki, Kd, POn, DOn);
         }
@@ -584,13 +678,39 @@ void loop(void) {
           // check what config stage we are in
           switch (buttonConfig) {
             case 0:
-              // if buttonConfig == 0 change temperature by 1 degree but only change it if it is NOT steaming
-              if (steamOn == 0){
+              // if buttonConfig == 0 change temperature by 1 degree but only change it if it is NOT steaming & not pulling
+              if (steamOn == 0 && pullOn == 0 && UIChangeMode==0){
+                // change profile
+                myProfile = myProfile + (float) (encoder->getDirection());
+                if (myProfile < 0) myProfile = MAX_PROFILE-1;
+                if (myProfile > (MAX_PROFILE-1)) myProfile = 0;
+
+                // update bar to first program stage bar
+                setPressure(profile[myProfile].bar[0]);
+                break;
+
+              } 
+
+              // not pulling shot or steam && UIChangeMode == 1
+              if (steamOn == 0 && pullOn == 0 && UIChangeMode == 1){
+                setPressure(myBar + (float) (encoder->getDirection()));
+                break;
+              }
+
+              // not pulling shot or steam && UIChangeMode == 3 change temp
+              if (steamOn == 0 && pullOn == 0 && UIChangeMode == 3){
                 brewTempTarget = Setpoint + (float) (encoder->getDirection());
                 Setpoint = brewTempTarget;
                 
                 // save off in EEPROM
-                EEPROM.put(EE_BREW_TEMP_TARGET_ADDR, (int)brewTempTarget);  
+                EEPROM.put(EE_BREW_TEMP_TARGET_ADDR, (int)brewTempTarget); 
+                break;
+              }
+
+              // check if brewing so vary pump xxx
+              if (pullOn > 0){
+                setPressure(myBar + (float) (encoder->getDirection()));
+                break;
               }
             break;
 
@@ -615,11 +735,18 @@ void loop(void) {
               else BrewingMinOn = BrewingMinOn - 5;
             break;
 
-            
             case 5:
-              // if buttonConfig == 5 change temperature by 1 degree 
+              // if buttonConfig == 5 change steam temperature by 1 degree 
               if (steamOn == 0){
                 steamTemp = steamTemp + (float) (encoder->getDirection()); 
+              }
+            break;
+            
+            case 6:
+              // if buttonConfig == 6 change brew temperature by 1 degree 
+              if (steamOn == 0){
+                brewTempTarget = brewTempTarget + (float) (encoder->getDirection()); 
+                Setpoint = brewTempTarget;
               }
             break;
           }
@@ -630,22 +757,8 @@ void loop(void) {
           pos = newPos;
       } // if
 
-      // detect button press
-      if (digitalRead(BUTTON_PIN) == LOW && ((millis() - buttonTime) > BUTTON_DEBOUNCE )) {
-        
-        // save off button press value
-        buttonTime = millis();
-
-        // button config mode on & increment to next stage
-        buttonConfig = (buttonConfig + 1) % 6; // cycle through 0-4 ONLY while always increase by 1
-
-        // safe all EEPROM.  If it has not change, put will not do the actual write.
-        EEPROM.put(EE_PID_P, (int)Kp); 
-        EEPROM.put(EE_PID_I, (int)Ki); 
-        EEPROM.put(EE_PID_D, (int)Kd); 
-        EEPROM.put(EE_BREWING_MIN_ON, (int)BrewingMinOn); 
-        EEPROM.put(EE_STEAM_TEMP, (int)steamTemp); 
-      }
+      // Detect Button Press
+      detectButton();
 
       // Update temperature
       boilerTemp = thermo.temperature(RNOMINAL, RREF)*1.8+32;
@@ -716,14 +829,25 @@ void loop(void) {
             myQuickPID.Compute();
 
         }
+        
+      // calculate pull start time
+      myTemp = millis() - pullOn;
 
+      // ***********************************************
+      // *** Compute Profile Pump pressure *** 
+      if (pullOn > 0 && (int (myTemp/1000) == profile[myProfile].sec[profileStage]) && profile[myProfile].bar[0] != 0) {
+        // Only run if the sec matches and pulling and it is not in custom profile
+        setPressure(profile[myProfile].bar[profileStage]);
+        profileStage++;
+
+        // error checking to make sure stage does not exceed 4
+        if (profileStage >4) profileStage =4;
+      } 
+      
       // ***********************************************
       // *** NOTE the next section ORDER is important ***
       // set relay to turn on boiler and pass in offset.  The offset is used to subtract away from relay pwm ms unit less than window size
       // if not pulling shot, use offset of 0
-      
-      // calculate pull start time
-      myTemp = millis() - pullOn;
       
       if (pullOn == 0) {
         boilerControl(0);
@@ -736,7 +860,7 @@ void loop(void) {
         if (boilerTemp <= (Setpoint+10)) {
           boilerControl(BrewingMinOn+prevPullOn*HOT_WATER_HEATER_BASELINE*HOT_WATER_STG1);
         } else boilerControl(0);
-        
+
         testMode = 1;
       } 
       
@@ -746,7 +870,7 @@ void loop(void) {
         if (boilerTemp < (Setpoint+10)) boilerControl(BrewingMinOn*0.5+prevPullOn*HOT_WATER_HEATER_BASELINE*HOT_WATER_STG2);
         else
           boilerControl(0);
-          
+        
         testMode = 2;
       }
 
@@ -837,3 +961,94 @@ void boilerControl(int offset) {
         boilerStat = true;
       }
 }
+
+// ***********************************************************************
+// This routine is used to set bar pressure to pump
+// including error checking if out of range & set global myBar
+void setPressure(int barTarg) {
+  // error checking
+  if (barTarg > 9) barTarg=9;
+  if (barTarg < 0) barTarg=0;
+  myBar = barTarg;
+  
+  // convert from bar to duty cycle
+  pumpDutyCycle = barToDuty[barTarg];
+
+  // set duty cycle to pump
+  analogWrite(WATER_PUMP_PWM, pumpDutyCycle);
+}
+
+// ***********************************************************************
+// This routine is used to check button press
+void detectButton() {
+  int elapseTime;
+
+  // No button press, just return
+  if (digitalRead(BUTTON_PIN) == HIGH) return;
+
+  // Process button press
+  buttonTime = millis();
+
+  // Cancel UI change mode if it was previously on temp change and return
+  if (UIChangeMode == 3){
+    UIChangeMode=0;
+    return;
+  }
+
+  // goto temp mode if it was previously on bar change
+  if (UIChangeMode == 1){
+    UIChangeMode=3;
+    return;
+  }
+  
+
+  // Wait until button is released
+  while (digitalRead(BUTTON_PIN) == LOW) {}
+  elapseTime=millis() - buttonTime;
+
+  // Short press
+  if (elapseTime < 500) {
+    switch (UIChangeMode) {
+      case 2:
+          // button config mode on & increment to next stage
+          buttonConfig = (buttonConfig + 1) % 7; // cycle through 0-6 ONLY while always increase by 1
+  
+          // reenter through all the options if at the end.  
+          if (buttonConfig == 0) buttonConfig=1;
+          break;
+          
+      default:
+          // if short press while in manual mode than go to bar change mode
+          if (profile[myProfile].bar[0]==0) {
+            UIChangeMode = 1;
+          } else {
+            // in other profiles change temp instead
+            UIChangeMode = 3;
+          }
+          break;
+      }
+  } // Short press
+  
+  // Long press
+  if ( elapseTime >= 500) { 
+    
+    // set config mode
+    if (UIChangeMode == 2) {
+      UIChangeMode = 0;
+      buttonConfig = 0;
+
+      // switching from config mode save off all EEPROM value  
+      // save all EEPROM.  If it has not change, put will not do the actual write.
+      EEPROM.put(EE_PID_P, (int)Kp); 
+      EEPROM.put(EE_PID_I, (int)Ki); 
+      EEPROM.put(EE_PID_D, (int)Kd); 
+      EEPROM.put(EE_BREWING_MIN_ON, (int)BrewingMinOn); 
+      EEPROM.put(EE_STEAM_TEMP, (int)steamTemp); 
+      EEPROM.put(EE_BREW_TEMP_TARGET_ADDR, (int)brewTempTarget); 
+    } else {
+      // entering config mode
+      UIChangeMode = 2;
+      buttonConfig = 1; 
+    }
+  } // long press
+} // detectButton()
